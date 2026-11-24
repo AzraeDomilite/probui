@@ -4,10 +4,14 @@
  *
  * Endpoints:
  *   POST /ui-prompt                  create an event, return 201 {eventId}
- *                                    + emit [ui-prompt] {...} on stdout
+ *                                    schedules [ui-prompt] on stdout after a
+ *                                    GRACE_MS delay so the client can cancel
  *   POST /ui-prompt/<id>/status      Claude pushes {status, message?, filePath?}
- *   POST /ui-prompt/<id>/cancel      front cancels within the grace window
- *                                    + emit [ui-prompt-cancel] {eventId} on stdout
+ *   POST /ui-prompt/<id>/cancel      front cancels; if still inside the grace
+ *                                    window, [ui-prompt] is never emitted and
+ *                                    Claude never sees the prompt. If already
+ *                                    dispatched, [ui-prompt-cancel] is emitted
+ *                                    so Claude can bail out.
  *   GET  /ui-prompt/<id>/events      SSE stream of status updates
  *   GET  /ui-prompt/<id>             current state as JSON (simple polling)
  *   GET  /ui-prompt/<id>/screenshot  attached PNG as a data URL (text/plain)
@@ -45,10 +49,15 @@ const EVENTS = new Map();
 const MAX_EVENTS = 100;
 const BODY_LIMIT = 4 * 1024 * 1024;
 const SCREENSHOT_LIMIT = 3 * 1024 * 1024;
+// Must match the popup's grace window (UiProbe.tsx SENT_GRACE_MS). Claude
+// Code does not see the prompt until this delay has elapsed, so a cancel
+// clicked within the window stops the dispatch entirely.
+const GRACE_MS = 4000;
 
 function emitNew(evt) {
   // The screenshot never goes to stdout (would flood the Claude chat). We expose
   // a bool instead, and Claude can fetch the PNG via GET /ui-prompt/<id>/screenshot.
+  evt.emitted = true;
   const line = {
     eventId: evt.eventId,
     t: evt.t,
@@ -136,6 +145,8 @@ async function handleCreate(req, res, origin) {
     filePath: '',
     createdAt: Date.now(),
     subscribers: [],
+    emitted: false,
+    dispatchTimer: null,
   };
   if (!evt.prompt) {
     return respondJSON(res, 400, { error: 'empty prompt' }, origin);
@@ -143,6 +154,7 @@ async function handleCreate(req, res, origin) {
   while (EVENTS.size >= MAX_EVENTS) {
     const oldestKey = EVENTS.keys().next().value;
     const ev = EVENTS.get(oldestKey);
+    if (ev.dispatchTimer) clearTimeout(ev.dispatchTimer);
     for (const subscriber of ev.subscribers) {
       try {
         subscriber.end();
@@ -153,7 +165,13 @@ async function handleCreate(req, res, origin) {
     EVENTS.delete(oldestKey);
   }
   EVENTS.set(evt.eventId, evt);
-  emitNew(evt);
+  // Delay the stdout emission so a cancel clicked within the grace window
+  // prevents Claude Code from ever seeing the prompt.
+  evt.dispatchTimer = setTimeout(() => {
+    evt.dispatchTimer = null;
+    if (evt.status === 'canceled') return;
+    emitNew(evt);
+  }, GRACE_MS);
   return respondJSON(res, 201, { eventId: evt.eventId }, origin);
 }
 
@@ -223,6 +241,14 @@ function handleGetScreenshot(evt, res, origin) {
 }
 
 function handleCancel(evt, res, origin) {
+  // Cancel during the grace window : clear the timer, mark the event as
+  // canceled, and emit nothing on stdout (Claude never saw the prompt).
+  // Cancel after dispatch : the event is already in Claude's hands, emit
+  // [ui-prompt-cancel] so Claude can bail if it hasn't acted yet.
+  if (evt.dispatchTimer) {
+    clearTimeout(evt.dispatchTimer);
+    evt.dispatchTimer = null;
+  }
   evt.status = 'canceled';
   evt.message = 'canceled by user';
   pushToSubscribers(evt, {
@@ -230,9 +256,11 @@ function handleCancel(evt, res, origin) {
     message: evt.message,
     filePath: evt.filePath,
   });
-  process.stdout.write(
-    `[ui-prompt-cancel] ${JSON.stringify({ eventId: evt.eventId, t: new Date().toISOString() })}\n`,
-  );
+  if (evt.emitted) {
+    process.stdout.write(
+      `[ui-prompt-cancel] ${JSON.stringify({ eventId: evt.eventId, t: new Date().toISOString() })}\n`,
+    );
+  }
   res.writeHead(204, corsHeaders(origin));
   res.end();
 }
