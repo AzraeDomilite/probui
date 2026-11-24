@@ -29,13 +29,9 @@ interface Selection {
   rect: DOMRect;
 }
 
-type State = 'idle' | 'sending' | 'waiting' | 'ok' | 'error';
+type State = 'idle' | 'sending' | 'sent' | 'error';
 
-interface BridgeStatus {
-  status: string;
-  message?: string;
-  filePath?: string;
-}
+const SENT_GRACE_MS = 4000;
 
 function buildSelector(el: Element): string {
   const parts: string[] = [];
@@ -181,7 +177,6 @@ export function UiProbe() {
   const [capture, setCapture] = useState(() => readLocalStorage<boolean>(KEY_CAPTURE, false));
   const [recents, setRecents] = useState<string[]>(() => readLocalStorage<string[]>(KEY_PROMPTS, []));
   const [eventId, setEventId] = useState<string | null>(null);
-  const [status, setStatus] = useState<BridgeStatus | null>(null);
   const [rectTick, setRectTick] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -194,7 +189,6 @@ export function UiProbe() {
       if (e.altKey && (e.key === 'U' || e.key === 'u')) {
         setActive((v) => !v);
         setSelection(null);
-        setStatus(null);
         setEventId(null);
         setState('idle');
       }
@@ -236,25 +230,6 @@ export function UiProbe() {
     if (selection && textareaRef.current) textareaRef.current.focus();
   }, [selection]);
 
-  // SSE: Claude pushes in_progress / editing · src/X.tsx / done / error.
-  useEffect(() => {
-    if (!eventId) return;
-    const src = new EventSource(`${URL_BRIDGE}/${eventId}/events`);
-    src.onmessage = (e) => {
-      try {
-        const data: BridgeStatus = JSON.parse(e.data);
-        setStatus(data);
-        if (data.status === 'done' || data.status === 'ok') setState('ok');
-        else if (data.status === 'error') setState('error');
-        else if (data.status && data.status !== 'pending') setState('waiting');
-      } catch {
-        /* ignore */
-      }
-    };
-    src.onerror = () => {};
-    return () => src.close();
-  }, [eventId]);
-
   // Keep the outline's rect in sync with scroll, resize and parent/child jumps.
   useEffect(() => {
     if (!selection) return;
@@ -289,7 +264,6 @@ export function UiProbe() {
     if (!selection || !prompt.trim()) return;
     setState('sending');
     setErrorMsg(null);
-    setStatus(null);
     setEventId(null);
     let dataURL: string | null = null;
     if (capture) {
@@ -309,33 +283,55 @@ export function UiProbe() {
         }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      await response.json();
+      const body = (await response.json()) as { eventId?: string };
       const next = [prompt.trim(), ...recents.filter((p) => p !== prompt.trim())].slice(
         0,
         MAX_RECENT_PROMPTS,
       );
       setRecents(next);
       writeLocalStorage(KEY_PROMPTS, next);
-      // One-shot UX: once the bridge has accepted the prompt, close the popup
-      // and switch the probe off. Claude's progress is visible in the terminal.
-      setSelection(null);
-      setPrompt('');
-      setState('idle');
-      setStatus(null);
-      setEventId(null);
-      setErrorMsg(null);
-      setActive(false);
+      // Grace window: the card stays visible for a few seconds with a cancel
+      // button, so the user can undo an unintended send. After the delay the
+      // popup closes and the probe switches off on its own.
+      if (body.eventId) setEventId(body.eventId);
+      setState('sent');
     } catch (e: unknown) {
       setState('error');
       setErrorMsg(String(e));
     }
   }, [selection, prompt, capture, recents]);
 
+  const resetAll = useCallback(() => {
+    setSelection(null);
+    setPrompt('');
+    setState('idle');
+    setEventId(null);
+    setErrorMsg(null);
+    setActive(false);
+  }, []);
+
+  const cancelSend = useCallback(async () => {
+    if (eventId) {
+      try {
+        await fetch(`${URL_BRIDGE}/${eventId}/cancel`, { method: 'POST' });
+      } catch {
+        /* best-effort: close anyway */
+      }
+    }
+    resetAll();
+  }, [eventId, resetAll]);
+
+  // Auto-close after the grace window if the user doesn't cancel.
+  useEffect(() => {
+    if (state !== 'sent') return;
+    const t = window.setTimeout(resetAll, SENT_GRACE_MS);
+    return () => window.clearTimeout(t);
+  }, [state, resetAll]);
+
   const closePopup = useCallback(() => {
     setSelection(null);
     setPrompt('');
     setState('idle');
-    setStatus(null);
     setEventId(null);
     setErrorMsg(null);
   }, []);
@@ -371,18 +367,6 @@ export function UiProbe() {
     ),
     [active],
   );
-
-  // 'pending' is the server's initial state (echoed on SSE connect). Treat it
-  // as "no banner yet" so the default 'sent, Claude listening…' shows until
-  // Claude pushes a real update.
-  const statusBanner =
-    status && status.status !== 'pending'
-      ? status.status === 'done' || status.status === 'ok'
-        ? `✓ done${status.filePath ? ` · ${status.filePath}` : ''}${status.message ? ` — ${status.message}` : ''}`
-        : status.status === 'error'
-          ? `✗ ${status.message || 'Claude error'}`
-          : `${status.status}${status.filePath ? ` · ${status.filePath}` : ''}${status.message ? ` — ${status.message}` : ''}`
-      : null;
 
   return (
     <div data-ui-probe>
@@ -495,7 +479,7 @@ export function UiProbe() {
                 if (e.key === 'Escape') closePopup();
               }}
               rows={4}
-              disabled={state === 'sending' || state === 'waiting'}
+              disabled={state !== 'idle' && state !== 'error'}
               style={{
                 width: '100%',
                 resize: 'vertical',
@@ -545,7 +529,7 @@ export function UiProbe() {
                   color:
                     state === 'error'
                       ? '#ff4e41'
-                      : state === 'ok'
+                      : state === 'sent'
                         ? '#78d978'
                         : '#92b0fa',
                   flex: 1,
@@ -553,47 +537,68 @@ export function UiProbe() {
                 }}
               >
                 {state === 'sending' && 'sending…'}
-                {state === 'waiting' && (statusBanner || 'sent, Claude listening…')}
-                {state === 'ok' && (statusBanner || '✓ done')}
-                {state === 'error' && (errorMsg || statusBanner || 'error')}
+                {state === 'sent' && 'sent — cancel to undo'}
+                {state === 'error' && (errorMsg || 'error')}
                 {state === 'idle' && 'Cmd+Enter to send'}
               </span>
               <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  type="button"
-                  data-ui-probe
-                  onClick={closePopup}
-                  style={{
-                    padding: '6px 10px',
-                    borderRadius: 4,
-                    border: '1px solid rgba(255,255,255,0.2)',
-                    background: 'transparent',
-                    color: '#edf2ff',
-                    cursor: 'pointer',
-                    fontSize: 12,
-                  }}
-                >
-                  close
-                </button>
-                <button
-                  type="button"
-                  data-ui-probe
-                  onClick={() => void send()}
-                  disabled={!prompt.trim() || state === 'sending' || state === 'waiting'}
-                  style={{
-                    padding: '6px 12px',
-                    borderRadius: 4,
-                    border: 'none',
-                    background: '#6388e3',
-                    color: '#030d20',
-                    cursor: prompt.trim() && state === 'idle' ? 'pointer' : 'not-allowed',
-                    fontWeight: 600,
-                    fontSize: 12,
-                    opacity: state === 'sending' || state === 'waiting' ? 0.6 : 1,
-                  }}
-                >
-                  send
-                </button>
+                {state === 'sent' ? (
+                  <button
+                    type="button"
+                    data-ui-probe
+                    onClick={() => void cancelSend()}
+                    style={{
+                      padding: '6px 12px',
+                      borderRadius: 4,
+                      border: '1px solid rgba(255,78,65,0.5)',
+                      background: 'rgba(255,78,65,0.15)',
+                      color: '#ff4e41',
+                      cursor: 'pointer',
+                      fontWeight: 600,
+                      fontSize: 12,
+                    }}
+                  >
+                    cancel
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      data-ui-probe
+                      onClick={closePopup}
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: 4,
+                        border: '1px solid rgba(255,255,255,0.2)',
+                        background: 'transparent',
+                        color: '#edf2ff',
+                        cursor: 'pointer',
+                        fontSize: 12,
+                      }}
+                    >
+                      close
+                    </button>
+                    <button
+                      type="button"
+                      data-ui-probe
+                      onClick={() => void send()}
+                      disabled={!prompt.trim() || state === 'sending'}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: 4,
+                        border: 'none',
+                        background: '#6388e3',
+                        color: '#030d20',
+                        cursor: prompt.trim() && state === 'idle' ? 'pointer' : 'not-allowed',
+                        fontWeight: 600,
+                        fontSize: 12,
+                        opacity: state === 'sending' ? 0.6 : 1,
+                      }}
+                    >
+                      send
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </div>

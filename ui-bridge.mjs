@@ -6,6 +6,8 @@
  *   POST /ui-prompt                  create an event, return 201 {eventId}
  *                                    + emit [ui-prompt] {...} on stdout
  *   POST /ui-prompt/<id>/status      Claude pushes {status, message?, filePath?}
+ *   POST /ui-prompt/<id>/cancel      front cancels within the grace window
+ *                                    + emit [ui-prompt-cancel] {eventId} on stdout
  *   GET  /ui-prompt/<id>/events      SSE stream of status updates
  *   GET  /ui-prompt/<id>             current state as JSON (simple polling)
  *   GET  /ui-prompt/<id>/screenshot  attached PNG as a data URL (text/plain)
@@ -220,7 +222,23 @@ function handleGetScreenshot(evt, res, origin) {
   res.end(evt.screenshot);
 }
 
+function handleCancel(evt, res, origin) {
+  evt.status = 'canceled';
+  evt.message = 'canceled by user';
+  pushToSubscribers(evt, {
+    status: evt.status,
+    message: evt.message,
+    filePath: evt.filePath,
+  });
+  process.stdout.write(
+    `[ui-prompt-cancel] ${JSON.stringify({ eventId: evt.eventId, t: new Date().toISOString() })}\n`,
+  );
+  res.writeHead(204, corsHeaders(origin));
+  res.end();
+}
+
 const regexStatus = /^\/ui-prompt\/([0-9a-f-]{32,36})\/status$/;
+const regexCancel = /^\/ui-prompt\/([0-9a-f-]{32,36})\/cancel$/;
 const regexEvents = /^\/ui-prompt\/([0-9a-f-]{32,36})\/events$/;
 const regexScreenshot = /^\/ui-prompt\/([0-9a-f-]{32,36})\/screenshot$/;
 const regexEvent = /^\/ui-prompt\/([0-9a-f-]{32,36})$/;
@@ -242,6 +260,12 @@ const server = http.createServer((req, res) => {
     const evt = EVENTS.get(mStatus[1]);
     if (!evt) return respondJSON(res, 404, { error: 'unknown event' }, origin);
     if (req.method === 'POST') return void handleStatus(evt, req, res, origin);
+  }
+  const mCancel = url.match(regexCancel);
+  if (mCancel && req.method === 'POST') {
+    const evt = EVENTS.get(mCancel[1]);
+    if (!evt) return respondJSON(res, 404, { error: 'unknown event' }, origin);
+    return handleCancel(evt, res, origin);
   }
   const mEvents = url.match(regexEvents);
   if (mEvents && req.method === 'GET') {
