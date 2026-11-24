@@ -309,15 +309,22 @@ export function UiProbe() {
         }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const body = (await response.json()) as { eventId?: string };
-      if (body.eventId) setEventId(body.eventId);
-      setState('waiting');
+      await response.json();
       const next = [prompt.trim(), ...recents.filter((p) => p !== prompt.trim())].slice(
         0,
         MAX_RECENT_PROMPTS,
       );
       setRecents(next);
       writeLocalStorage(KEY_PROMPTS, next);
+      // One-shot UX: once the bridge has accepted the prompt, close the popup
+      // and switch the probe off. Claude's progress is visible in the terminal.
+      setSelection(null);
+      setPrompt('');
+      setState('idle');
+      setStatus(null);
+      setEventId(null);
+      setErrorMsg(null);
+      setActive(false);
     } catch (e: unknown) {
       setState('error');
       setErrorMsg(String(e));
