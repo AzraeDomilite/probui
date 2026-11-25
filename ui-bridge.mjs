@@ -61,6 +61,11 @@ function emitNew(evt) {
   // The screenshot never goes to stdout (would flood the Claude chat). We expose
   // a bool instead, and Claude can fetch the PNG via GET /ui-prompt/<id>/screenshot.
   evt.emitted = true;
+  // Flip the stored status from 'pending' to 'dispatched' so the history panel
+  // can tell apart "waiting on the grace window" from "handed off to Claude".
+  // Claude's own POST /status pushes (in_progress / editing / done / error)
+  // override this value.
+  if (evt.status === 'pending') evt.status = 'dispatched';
   const line = {
     eventId: evt.eventId,
     t: evt.t,

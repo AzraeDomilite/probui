@@ -50,12 +50,26 @@ interface HistoryEvent {
 const SENT_GRACE_MS = 4000;
 
 // Pure helper for the status pill color (also used in the history panel).
-function statusTone(status: string): { label: string; bg: string; fg: string } {
-  if (status === 'done' || status === 'ok') return { label: 'done', bg: 'rgba(120,217,120,0.15)', fg: '#78d978' };
-  if (status === 'error') return { label: 'error', bg: 'rgba(255,78,65,0.15)', fg: '#ff4e41' };
-  if (status === 'canceled') return { label: 'canceled', bg: 'rgba(146,176,250,0.1)', fg: '#92b0fa' };
-  if (status === 'pending') return { label: 'pending', bg: 'rgba(146,176,250,0.1)', fg: '#92b0fa' };
-  return { label: status || 'running', bg: 'rgba(99,136,227,0.18)', fg: '#6388e3' };
+// Three canonical states : waiting (cancel window), running (Claude acting),
+// done/error/canceled (terminal). Any custom status Claude pushes is shown
+// verbatim but keeps the 'running' palette.
+function statusTone(status: string, emitted: boolean): { label: string; bg: string; fg: string } {
+  if (!emitted && status === 'pending') {
+    return { label: 'waiting', bg: 'rgba(146,176,250,0.12)', fg: '#92b0fa' };
+  }
+  if (status === 'done' || status === 'ok') {
+    return { label: 'done', bg: 'rgba(120,217,120,0.15)', fg: '#78d978' };
+  }
+  if (status === 'error') {
+    return { label: 'error', bg: 'rgba(255,78,65,0.15)', fg: '#ff4e41' };
+  }
+  if (status === 'canceled') {
+    return { label: 'canceled', bg: 'rgba(146,176,250,0.08)', fg: '#92b0fa' };
+  }
+  if (status === 'dispatched') {
+    return { label: 'running', bg: 'rgba(99,136,227,0.2)', fg: '#6388e3' };
+  }
+  return { label: status || 'running', bg: 'rgba(99,136,227,0.2)', fg: '#6388e3' };
 }
 
 function buildSelector(el: Element): string {
@@ -522,11 +536,7 @@ export function UiProbe() {
           ) : (
             <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
               {historyEvents.map((evt) => {
-                const tone = statusTone(evt.status);
-                const dispatched = evt.emitted;
-                const terminal = evt.status === 'done' || evt.status === 'ok' || evt.status === 'error' || evt.status === 'canceled';
-                const inFlight = dispatched && !terminal;
-                const pendingGrace = !dispatched && evt.status === 'pending';
+                const tone = statusTone(evt.status, evt.emitted);
                 return (
                   <li
                     key={evt.eventId}
@@ -553,7 +563,7 @@ export function UiProbe() {
                           textTransform: 'uppercase',
                         }}
                       >
-                        {pendingGrace ? 'grace' : inFlight ? tone.label : tone.label}
+                        {tone.label}
                       </span>
                       <time
                         dateTime={evt.t}
