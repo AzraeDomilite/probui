@@ -242,14 +242,43 @@ To match your design system: search-and-replace those hex values. The mono font 
 
 ## 8. Security
 
-- **Loopback only**: the bridge listens on `127.0.0.1`, never `0.0.0.0`.
+- **Loopback by default**: the bridge listens on `127.0.0.1` unless `UI_BRIDGE_HOST=0.0.0.0` is set. In loopback mode, no auth is enforced.
+- **Bearer token when exposed**: once `UI_BRIDGE_TOKEN=<secret>` is set, every endpoint rejects requests without `Authorization: Bearer <secret>` (401). Mandatory the moment the bridge leaves loopback.
 - **Explicit flag in prod**: without `VITE_UI_PROBE=1`, the dynamic import is never loaded.
-- **Strict CORS**: `ALLOWED_ORIGINS` is a closed allowlist.
+- **Strict CORS**: `ALLOWED_ORIGINS` is a closed allowlist. Extra origins can be appended with `UI_BRIDGE_EXTRA_ORIGINS=https://a.com,https://b.com`.
 - **Size limits**: 4 MiB HTTP body, 3 MiB screenshot, 4000 char prompt, 100 events in memory max.
 - **No execution**: the bridge only writes to stdout and relays statuses. Actual execution comes from Claude Code, which asks the user for permission as for any file edit.
 - **Screenshot opt-in**: disabled by default, the user explicitly ticks it. `html2canvas` is loaded only on first opt-in.
 
 **Do not ship `VITE_UI_PROBE=1` to real production** — it's a dev tool. The flag is fine on an internal staging.
+
+## 8.1. Shared bridge for a team
+
+The default loopback mode is for a single developer. When several teammates need to send prompts to one Claude Code session (typical case : one lead runs the bridge and the Monitor, the rest of the team uses the overlay from their own browser) :
+
+**On the host that runs Claude Code and the bridge** :
+
+```bash
+# Generate a token once (keep it out of git)
+export UI_BRIDGE_TOKEN="$(openssl rand -hex 24)"
+# Start the bridge, bound on all interfaces
+UI_BRIDGE_HOST=0.0.0.0 \
+UI_BRIDGE_TOKEN="$UI_BRIDGE_TOKEN" \
+UI_BRIDGE_EXTRA_ORIGINS="https://staging.example.com" \
+  node ui-bridge.mjs
+```
+
+Put HTTPS in front of the bridge (Caddy, nginx, Traefik, cloudflared tunnel). The bridge itself only speaks plain HTTP — TLS is the reverse proxy's job.
+
+**On each teammate's browser** :
+
+Open the probui popup → **⚙ bridge** floating button → set :
+- **bridge URL** : `https://bridge.example.com` (the public URL of your proxy)
+- **token** : the secret the host generated
+
+Both are persisted in `localStorage` (`probui.bridge_url.v1`, `probui.token.v1`), per browser. Leave the URL empty to fall back to the compile-time default (`VITE_UI_BRIDGE_URL`) — handy for solo dev on the same machine.
+
+**On the host, Claude Code Monitor** : nothing changes. The bridge emits `[ui-prompt] {…}` on stdout the same way. The `author` field in the payload tells Claude who sent each prompt.
 
 ## 9. Known limitations
 

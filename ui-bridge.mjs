@@ -26,10 +26,19 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 
 const PORT = Number(process.env.UI_BRIDGE_PORT) || 8766;
+// Default binds to loopback. Set UI_BRIDGE_HOST=0.0.0.0 to share the bridge
+// across a team ; in that mode a UI_BRIDGE_TOKEN is strongly recommended.
+const HOST = process.env.UI_BRIDGE_HOST || '127.0.0.1';
+const TOKEN = process.env.UI_BRIDGE_TOKEN || '';
+// Optional comma-separated allowlist appended to the built-in dev origins.
+const EXTRA_ORIGINS = (process.env.UI_BRIDGE_EXTRA_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 // Common dev-server ports: Vite (5173–5175 and preview 4173), CRA/Next (3000),
 // VS Code Live Server (5500), generic container (8080); both localhost and
-// 127.0.0.1 variants. Add your dev server here if it runs elsewhere.
+// 127.0.0.1 variants. Append UI_BRIDGE_EXTRA_ORIGINS=... for staging / prod.
 const ALLOWED_ORIGINS = new Set([
   'http://localhost:5173',
   'http://127.0.0.1:5173',
@@ -45,6 +54,7 @@ const ALLOWED_ORIGINS = new Set([
   'http://127.0.0.1:5500',
   'http://localhost:8080',
   'http://127.0.0.1:8080',
+  ...EXTRA_ORIGINS,
 ]);
 
 // Volatile store; FIFO-trimmed to MAX_EVENTS. A restart wipes everything.
@@ -94,10 +104,22 @@ function corsHeaders(origin) {
   const allowed = origin && ALLOWED_ORIGINS.has(origin) ? origin : 'http://localhost:5173';
   return {
     'Access-Control-Allow-Origin': allowed,
-    'Access-Control-Allow-Headers': 'content-type',
+    'Access-Control-Allow-Headers': 'content-type, authorization',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Max-Age': '600',
   };
+}
+
+function checkToken(req, res, origin) {
+  if (!TOKEN) return true; // auth off in loopback dev mode
+  const h = req.headers['authorization'] || '';
+  const match = /^Bearer\s+(.+)$/.exec(h);
+  if (!match || match[1] !== TOKEN) {
+    res.writeHead(401, { 'content-type': 'application/json', ...corsHeaders(origin) });
+    res.end(JSON.stringify({ error: 'unauthorized' }));
+    return false;
+  }
+  return true;
 }
 
 function readBody(req, limit = BODY_LIMIT) {
@@ -309,6 +331,7 @@ const server = http.createServer((req, res) => {
     res.end();
     return;
   }
+  if (!checkToken(req, res, origin)) return;
   const url = req.url || '';
   if (req.method === 'POST' && url === '/ui-prompt') {
     void handleCreate(req, res, origin);
@@ -351,6 +374,7 @@ const server = http.createServer((req, res) => {
   res.end();
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  process.stderr.write(`[ui-bridge] listening on 127.0.0.1:${PORT} (SSE + screenshot + status)\n`);
+server.listen(PORT, HOST, () => {
+  const auth = TOKEN ? 'token required' : 'no auth (loopback)';
+  process.stderr.write(`[ui-bridge] listening on ${HOST}:${PORT} (${auth})\n`);
 });

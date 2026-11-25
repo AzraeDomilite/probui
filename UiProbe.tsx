@@ -8,15 +8,31 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-const URL_BRIDGE_BASE =
+// Default bridge URL comes from the build (VITE_UI_BRIDGE_URL) but the user
+// can override it at runtime via the popup settings — persisted per browser.
+const URL_BRIDGE_DEFAULT =
   (import.meta.env && (import.meta.env.VITE_UI_BRIDGE_URL as string | undefined)) ||
   'http://127.0.0.1:8766';
-const URL_BRIDGE_ROOT = URL_BRIDGE_BASE.replace(/\/+$/, '');
-const URL_BRIDGE = `${URL_BRIDGE_ROOT}/ui-prompt`;
-const URL_BRIDGE_LIST = `${URL_BRIDGE_ROOT}/ui-prompts`;
 const KEY_PROMPTS = 'probui.recent_prompts.v1';
 const KEY_CAPTURE = 'probui.capture_enabled.v1';
 const KEY_AUTHOR = 'probui.author.v1';
+const KEY_BRIDGE_URL = 'probui.bridge_url.v1';
+const KEY_TOKEN = 'probui.token.v1';
+
+function bridgeRoot(bridgeUrl: string): string {
+  return (bridgeUrl || URL_BRIDGE_DEFAULT).replace(/\/+$/, '');
+}
+
+function bridgeFetch(
+  bridgeUrl: string,
+  token: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+  if (token) headers.set('authorization', `Bearer ${token}`);
+  return fetch(`${bridgeRoot(bridgeUrl)}${path}`, { ...init, headers });
+}
 const HTML2CANVAS_CDN = 'https://esm.sh/html2canvas@1.4.1';
 const MAX_RECENT_PROMPTS = 10;
 const HISTORY_POLL_MS = 2000;
@@ -218,6 +234,9 @@ export function UiProbe() {
   const [capture, setCapture] = useState(() => readLocalStorage<boolean>(KEY_CAPTURE, false));
   const [recents, setRecents] = useState<string[]>(() => readLocalStorage<string[]>(KEY_PROMPTS, []));
   const [author, setAuthor] = useState(() => readLocalStorage<string>(KEY_AUTHOR, ''));
+  const [bridgeUrl, setBridgeUrl] = useState(() => readLocalStorage<string>(KEY_BRIDGE_URL, ''));
+  const [token, setToken] = useState(() => readLocalStorage<string>(KEY_TOKEN, ''));
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [eventId, setEventId] = useState<string | null>(null);
   const [rectTick, setRectTick] = useState(0);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -231,6 +250,14 @@ export function UiProbe() {
   useEffect(() => {
     writeLocalStorage(KEY_AUTHOR, author);
   }, [author]);
+
+  useEffect(() => {
+    writeLocalStorage(KEY_BRIDGE_URL, bridgeUrl);
+  }, [bridgeUrl]);
+
+  useEffect(() => {
+    writeLocalStorage(KEY_TOKEN, token);
+  }, [token]);
 
   useEffect(() => {
     const kd = (e: KeyboardEvent) => {
@@ -318,7 +345,7 @@ export function UiProbe() {
       dataURL = await captureElement(selection.element);
     }
     try {
-      const response = await fetch(URL_BRIDGE, {
+      const response = await bridgeFetch(bridgeUrl, token, '/ui-prompt', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -348,7 +375,7 @@ export function UiProbe() {
       setState('error');
       setErrorMsg(String(e));
     }
-  }, [selection, prompt, capture, recents, author]);
+  }, [selection, prompt, capture, recents, author, bridgeUrl, token]);
 
   const resetAll = useCallback(() => {
     setSelection(null);
@@ -362,13 +389,13 @@ export function UiProbe() {
   const cancelSend = useCallback(async () => {
     if (eventId) {
       try {
-        await fetch(`${URL_BRIDGE}/${eventId}/cancel`, { method: 'POST' });
+        await bridgeFetch(bridgeUrl, token, `/ui-prompt/${eventId}/cancel`, { method: 'POST' });
       } catch {
         /* best-effort: close anyway */
       }
     }
     resetAll();
-  }, [eventId, resetAll]);
+  }, [eventId, resetAll, bridgeUrl, token]);
 
   // Auto-close after the grace window if the user doesn't cancel.
   useEffect(() => {
@@ -392,7 +419,7 @@ export function UiProbe() {
     let alive = true;
     const load = async () => {
       try {
-        const resp = await fetch(URL_BRIDGE_LIST);
+        const resp = await bridgeFetch(bridgeUrl, token, '/ui-prompts');
         if (!resp.ok) return;
         const body = (await resp.json()) as { events?: HistoryEvent[] };
         if (alive) setHistoryEvents(body.events ?? []);
@@ -406,7 +433,7 @@ export function UiProbe() {
       alive = false;
       window.clearInterval(t);
     };
-  }, [historyOpen]);
+  }, [historyOpen, bridgeUrl, token]);
 
   const button = useMemo(
     () => (
@@ -472,10 +499,167 @@ export function UiProbe() {
     [historyOpen],
   );
 
+  const settingsButton = useMemo(
+    () => (
+      <button
+        type="button"
+        data-ui-probe
+        onClick={() => setSettingsOpen((v) => !v)}
+        title="Bridge URL and token"
+        style={{
+          position: 'fixed',
+          bottom: 16,
+          right: 260,
+          zIndex: 2147483646,
+          padding: '8px 12px',
+          borderRadius: 999,
+          border: `1px solid ${settingsOpen ? '#6388e3' : 'rgba(255,255,255,0.3)'}`,
+          background: settingsOpen ? '#6388e3' : 'rgba(10,30,65,0.8)',
+          color: settingsOpen ? '#030d20' : '#edf2ff',
+          fontFamily: '"Kode Mono", monospace',
+          fontSize: 12,
+          letterSpacing: '0.04em',
+          textTransform: 'uppercase',
+          cursor: 'pointer',
+          backdropFilter: 'blur(8px)',
+          boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+        }}
+      >
+        ⚙ bridge
+      </button>
+    ),
+    [settingsOpen],
+  );
+
   return (
     <div data-ui-probe>
       {button}
       {historyButton}
+      {settingsButton}
+      {settingsOpen && (
+        <aside
+          data-ui-probe
+          role="dialog"
+          aria-label="UI probe bridge settings"
+          style={{
+            position: 'fixed',
+            bottom: 72,
+            right: 16,
+            zIndex: 2147483647,
+            width: 420,
+            maxWidth: 'calc(100vw - 32px)',
+            padding: 16,
+            borderRadius: 8,
+            border: '1px solid #6388e3',
+            background: 'rgba(3,13,32,0.95)',
+            color: '#edf2ff',
+            fontFamily: 'Lato, system-ui, sans-serif',
+            fontSize: 13,
+            backdropFilter: 'blur(12px)',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+          }}
+        >
+          <header
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'baseline',
+              marginBottom: 12,
+            }}
+          >
+            <span
+              style={{
+                fontFamily: '"Kode Mono", monospace',
+                fontSize: 11,
+                color: '#92b0fa',
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+              }}
+            >
+              Bridge connection
+            </span>
+            <button
+              type="button"
+              data-ui-probe
+              onClick={() => setSettingsOpen(false)}
+              style={{
+                padding: '2px 8px',
+                borderRadius: 4,
+                border: '1px solid rgba(255,255,255,0.2)',
+                background: 'transparent',
+                color: '#edf2ff',
+                cursor: 'pointer',
+                fontSize: 11,
+              }}
+            >
+              close
+            </button>
+          </header>
+          <label
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+              marginBottom: 10,
+              fontSize: 11,
+              color: '#92b0fa',
+              fontFamily: '"Kode Mono", monospace',
+            }}
+          >
+            <span>bridge URL (overrides VITE_UI_BRIDGE_URL)</span>
+            <input
+              type="text"
+              data-ui-probe
+              value={bridgeUrl}
+              onChange={(e) => setBridgeUrl(e.target.value)}
+              placeholder={URL_BRIDGE_DEFAULT}
+              style={{
+                padding: '5px 8px',
+                borderRadius: 4,
+                border: '1px solid rgba(146,176,250,0.3)',
+                background: 'rgba(3,13,32,0.8)',
+                color: '#edf2ff',
+                fontFamily: 'inherit',
+                fontSize: 12,
+              }}
+            />
+          </label>
+          <label
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+              marginBottom: 10,
+              fontSize: 11,
+              color: '#92b0fa',
+              fontFamily: '"Kode Mono", monospace',
+            }}
+          >
+            <span>token (sent as Authorization: Bearer ...)</span>
+            <input
+              type="password"
+              data-ui-probe
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="leave empty if the bridge has no auth"
+              autoComplete="off"
+              style={{
+                padding: '5px 8px',
+                borderRadius: 4,
+                border: '1px solid rgba(146,176,250,0.3)',
+                background: 'rgba(3,13,32,0.8)',
+                color: '#edf2ff',
+                fontFamily: 'inherit',
+                fontSize: 12,
+              }}
+            />
+          </label>
+          <p style={{ fontSize: 11, color: '#92b0fa', margin: 0, fontStyle: 'italic' }}>
+            Values are persisted in localStorage per browser. Leave the URL
+            empty to fall back to the compile-time default.
+          </p>
+        </aside>
+      )}
       {historyOpen && (
         <aside
           data-ui-probe
