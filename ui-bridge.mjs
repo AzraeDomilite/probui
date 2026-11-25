@@ -12,6 +12,9 @@
  *                                    Claude never sees the prompt. If already
  *                                    dispatched, [ui-prompt-cancel] is emitted
  *                                    so Claude can bail out.
+ *   GET  /ui-prompts                 list all events in memory (most recent first)
+ *                                    without screenshots — used by the history
+ *                                    panel of the UiProbe overlay.
  *   GET  /ui-prompt/<id>/events      SSE stream of status updates
  *   GET  /ui-prompt/<id>             current state as JSON (simple polling)
  *   GET  /ui-prompt/<id>/screenshot  attached PNG as a data URL (text/plain)
@@ -240,6 +243,26 @@ function handleGetScreenshot(evt, res, origin) {
   res.end(evt.screenshot);
 }
 
+function handleList(res, origin) {
+  // Most recent first ; screenshots are omitted (bulky). Only expose a bool
+  // so the UI can show an icon when a PNG is available.
+  const events = [...EVENTS.values()]
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .map((evt) => ({
+      eventId: evt.eventId,
+      t: evt.t,
+      prompt: evt.prompt,
+      selector: evt.selector,
+      url: evt.url,
+      status: evt.status,
+      message: evt.message,
+      filePath: evt.filePath,
+      hasScreenshot: !!evt.screenshot,
+      emitted: !!evt.emitted,
+    }));
+  return respondJSON(res, 200, { events }, origin);
+}
+
 function handleCancel(evt, res, origin) {
   // Cancel during the grace window : clear the timer, mark the event as
   // canceled, and emit nothing on stdout (Claude never saw the prompt).
@@ -282,6 +305,9 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST' && url === '/ui-prompt') {
     void handleCreate(req, res, origin);
     return;
+  }
+  if (req.method === 'GET' && url === '/ui-prompts') {
+    return handleList(res, origin);
   }
   const mStatus = url.match(regexStatus);
   if (mStatus) {

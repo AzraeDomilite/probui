@@ -11,11 +11,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 const URL_BRIDGE_BASE =
   (import.meta.env && (import.meta.env.VITE_UI_BRIDGE_URL as string | undefined)) ||
   'http://127.0.0.1:8766';
-const URL_BRIDGE = `${URL_BRIDGE_BASE.replace(/\/+$/, '')}/ui-prompt`;
+const URL_BRIDGE_ROOT = URL_BRIDGE_BASE.replace(/\/+$/, '');
+const URL_BRIDGE = `${URL_BRIDGE_ROOT}/ui-prompt`;
+const URL_BRIDGE_LIST = `${URL_BRIDGE_ROOT}/ui-prompts`;
 const KEY_PROMPTS = 'probui.recent_prompts.v1';
 const KEY_CAPTURE = 'probui.capture_enabled.v1';
 const HTML2CANVAS_CDN = 'https://esm.sh/html2canvas@1.4.1';
 const MAX_RECENT_PROMPTS = 10;
+const HISTORY_POLL_MS = 2000;
 
 type Html2Canvas = (
   el: HTMLElement,
@@ -31,7 +34,29 @@ interface Selection {
 
 type State = 'idle' | 'sending' | 'sent' | 'error';
 
+interface HistoryEvent {
+  eventId: string;
+  t: string;
+  prompt: string;
+  selector: string;
+  url: string;
+  status: string;
+  message: string;
+  filePath: string;
+  hasScreenshot: boolean;
+  emitted: boolean;
+}
+
 const SENT_GRACE_MS = 4000;
+
+// Pure helper for the status pill color (also used in the history panel).
+function statusTone(status: string): { label: string; bg: string; fg: string } {
+  if (status === 'done' || status === 'ok') return { label: 'done', bg: 'rgba(120,217,120,0.15)', fg: '#78d978' };
+  if (status === 'error') return { label: 'error', bg: 'rgba(255,78,65,0.15)', fg: '#ff4e41' };
+  if (status === 'canceled') return { label: 'canceled', bg: 'rgba(146,176,250,0.1)', fg: '#92b0fa' };
+  if (status === 'pending') return { label: 'pending', bg: 'rgba(146,176,250,0.1)', fg: '#92b0fa' };
+  return { label: status || 'running', bg: 'rgba(99,136,227,0.18)', fg: '#6388e3' };
+}
 
 function buildSelector(el: Element): string {
   const parts: string[] = [];
@@ -178,6 +203,8 @@ export function UiProbe() {
   const [recents, setRecents] = useState<string[]>(() => readLocalStorage<string[]>(KEY_PROMPTS, []));
   const [eventId, setEventId] = useState<string | null>(null);
   const [rectTick, setRectTick] = useState(0);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyEvents, setHistoryEvents] = useState<HistoryEvent[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -336,6 +363,29 @@ export function UiProbe() {
     setErrorMsg(null);
   }, []);
 
+  // Poll the bridge when the history panel is open. 2 s cadence is enough
+  // for Claude's status pushes to feel live without flooding the loopback.
+  useEffect(() => {
+    if (!historyOpen) return;
+    let alive = true;
+    const load = async () => {
+      try {
+        const resp = await fetch(URL_BRIDGE_LIST);
+        if (!resp.ok) return;
+        const body = (await resp.json()) as { events?: HistoryEvent[] };
+        if (alive) setHistoryEvents(body.events ?? []);
+      } catch {
+        /* bridge down : keep previous snapshot */
+      }
+    };
+    void load();
+    const t = window.setInterval(load, HISTORY_POLL_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, [historyOpen]);
+
   const button = useMemo(
     () => (
       <button
@@ -368,9 +418,203 @@ export function UiProbe() {
     [active],
   );
 
+  const historyButton = useMemo(
+    () => (
+      <button
+        type="button"
+        data-ui-probe
+        onClick={() => setHistoryOpen((v) => !v)}
+        title="Toggle the history panel"
+        style={{
+          position: 'fixed',
+          bottom: 16,
+          right: 150,
+          zIndex: 2147483646,
+          padding: '8px 12px',
+          borderRadius: 999,
+          border: `1px solid ${historyOpen ? '#6388e3' : 'rgba(255,255,255,0.3)'}`,
+          background: historyOpen ? '#6388e3' : 'rgba(10,30,65,0.8)',
+          color: historyOpen ? '#030d20' : '#edf2ff',
+          fontFamily: '"Kode Mono", monospace',
+          fontSize: 12,
+          letterSpacing: '0.04em',
+          textTransform: 'uppercase',
+          cursor: 'pointer',
+          backdropFilter: 'blur(8px)',
+          boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+        }}
+      >
+        ≡ history
+      </button>
+    ),
+    [historyOpen],
+  );
+
   return (
     <div data-ui-probe>
       {button}
+      {historyButton}
+      {historyOpen && (
+        <aside
+          data-ui-probe
+          role="dialog"
+          aria-label="UI probe history"
+          style={{
+            position: 'fixed',
+            bottom: 72,
+            right: 16,
+            zIndex: 2147483646,
+            width: 420,
+            maxWidth: 'calc(100vw - 32px)',
+            maxHeight: 'calc(100vh - 128px)',
+            overflow: 'auto',
+            padding: 14,
+            borderRadius: 8,
+            border: '1px solid #6388e3',
+            background: 'rgba(3,13,32,0.95)',
+            color: '#edf2ff',
+            fontFamily: 'Lato, system-ui, sans-serif',
+            fontSize: 13,
+            backdropFilter: 'blur(12px)',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+          }}
+        >
+          <header
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'baseline',
+              marginBottom: 10,
+            }}
+          >
+            <span
+              style={{
+                fontFamily: '"Kode Mono", monospace',
+                fontSize: 11,
+                color: '#92b0fa',
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+              }}
+            >
+              History · {historyEvents.length}
+            </span>
+            <button
+              type="button"
+              data-ui-probe
+              onClick={() => setHistoryOpen(false)}
+              style={{
+                padding: '2px 8px',
+                borderRadius: 4,
+                border: '1px solid rgba(255,255,255,0.2)',
+                background: 'transparent',
+                color: '#edf2ff',
+                cursor: 'pointer',
+                fontSize: 11,
+              }}
+            >
+              close
+            </button>
+          </header>
+          {historyEvents.length === 0 ? (
+            <p style={{ fontSize: 12, color: '#92b0fa', margin: 0 }}>
+              No events yet — send one from the UI probe.
+            </p>
+          ) : (
+            <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {historyEvents.map((evt) => {
+                const tone = statusTone(evt.status);
+                const dispatched = evt.emitted;
+                const terminal = evt.status === 'done' || evt.status === 'ok' || evt.status === 'error' || evt.status === 'canceled';
+                const inFlight = dispatched && !terminal;
+                const pendingGrace = !dispatched && evt.status === 'pending';
+                return (
+                  <li
+                    key={evt.eventId}
+                    style={{
+                      padding: 10,
+                      borderRadius: 4,
+                      border: '1px solid rgba(146,176,250,0.2)',
+                      background: 'rgba(3,13,32,0.6)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 6,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <span
+                        style={{
+                          padding: '2px 8px',
+                          borderRadius: 999,
+                          background: tone.bg,
+                          color: tone.fg,
+                          fontFamily: '"Kode Mono", monospace',
+                          fontSize: 10,
+                          letterSpacing: '0.06em',
+                          textTransform: 'uppercase',
+                        }}
+                      >
+                        {pendingGrace ? 'grace' : inFlight ? tone.label : tone.label}
+                      </span>
+                      <time
+                        dateTime={evt.t}
+                        style={{ fontSize: 11, color: '#92b0fa', fontFamily: '"Kode Mono", monospace' }}
+                      >
+                        {new Date(evt.t).toLocaleTimeString()}
+                      </time>
+                      {evt.hasScreenshot && (
+                        <span style={{ fontSize: 10, color: '#92b0fa' }} title="screenshot attached">
+                          📷
+                        </span>
+                      )}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 13,
+                        lineHeight: 1.4,
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                      }}
+                    >
+                      {evt.prompt.length > 180 ? evt.prompt.slice(0, 179) + '…' : evt.prompt}
+                    </div>
+                    {evt.selector && (
+                      <div
+                        style={{
+                          fontFamily: '"Kode Mono", monospace',
+                          fontSize: 11,
+                          color: '#92b0fa',
+                          wordBreak: 'break-all',
+                        }}
+                      >
+                        {evt.selector}
+                      </div>
+                    )}
+                    {evt.filePath && (
+                      <div
+                        style={{
+                          fontFamily: '"Kode Mono", monospace',
+                          fontSize: 11,
+                          color: tone.fg,
+                          wordBreak: 'break-all',
+                        }}
+                      >
+                        {evt.filePath}
+                      </div>
+                    )}
+                    {evt.message && (
+                      <div
+                        style={{ fontSize: 12, color: '#92b0fa', fontStyle: 'italic', wordBreak: 'break-word' }}
+                      >
+                        {evt.message}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </aside>
+      )}
       {active && hover && !selection && <Outline rect={hover.getBoundingClientRect()} />}
       {selection && currentRect && (
         <>
