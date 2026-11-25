@@ -33,6 +33,52 @@ function bridgeFetch(
   if (token) headers.set('authorization', `Bearer ${token}`);
   return fetch(`${bridgeRoot(bridgeUrl)}${path}`, { ...init, headers });
 }
+
+// OAuth-backed deployment : the consumer (e.g. a Django site with session
+// cookies) mounts probui with mode='oauth' and endpointBase pointing at a
+// backend relay (same origin). The backend is trusted to inject `author`
+// from the authenticated session before forwarding to the loopback bridge,
+// so the client sends no token and no manual author.
+function oauthFetch(
+  endpointBase: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+  // Django CSRF : the cookie is readable, the header is required for POST.
+  // Harmless for frameworks that don't check it.
+  try {
+    const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+    if (match && match[1] && (init.method || 'GET').toUpperCase() !== 'GET') {
+      headers.set('x-csrftoken', decodeURIComponent(match[1]));
+    }
+  } catch {
+    /* no cookie access, continue without CSRF */
+  }
+  return fetch(`${endpointBase.replace(/\/+$/, '')}${path}`, {
+    ...init,
+    headers,
+    credentials: 'same-origin',
+  });
+}
+
+export interface UiProbeProps {
+  // When 'oauth', probui POSTs to a same-origin relay (endpointBase) instead
+  // of the loopback bridge. The relay is responsible for injecting `author`
+  // from the authenticated session and forwarding to the real bridge. In
+  // this mode the ⚙ bridge button, the author input, the bridge URL and the
+  // token are hidden — nothing is user-configurable.
+  mode?: 'loopback' | 'oauth';
+  // Override the default endpoint. In mode='oauth' this is a relative path
+  // on the same origin (e.g. "/api/advent"). In mode='loopback' it's a
+  // full URL to a shared bridge, used as the compile-time fallback when the
+  // user hasn't set one in the popup settings.
+  endpointBase?: string;
+  // Replaces the user-editable author field. Mainly useful in mode='oauth'
+  // to display the logged-in user's identifier in the history, even though
+  // it's the backend that actually stamps the event.
+  authorOverride?: string;
+}
 const HTML2CANVAS_CDN = 'https://esm.sh/html2canvas@1.4.1';
 const MAX_RECENT_PROMPTS = 10;
 const HISTORY_POLL_MS = 2000;
@@ -224,7 +270,7 @@ const navButtonStyle = {
   minWidth: 28,
 } as const;
 
-export function UiProbe() {
+export function UiProbe({ mode = 'loopback', endpointBase, authorOverride }: UiProbeProps = {}) {
   const [active, setActive] = useState(false);
   const [hover, setHover] = useState<Element | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -233,10 +279,19 @@ export function UiProbe() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [capture, setCapture] = useState(() => readLocalStorage<boolean>(KEY_CAPTURE, false));
   const [recents, setRecents] = useState<string[]>(() => readLocalStorage<string[]>(KEY_PROMPTS, []));
-  const [author, setAuthor] = useState(() => readLocalStorage<string>(KEY_AUTHOR, ''));
+  const [authorLocal, setAuthorLocal] = useState(() => readLocalStorage<string>(KEY_AUTHOR, ''));
+  const author = authorOverride ?? authorLocal;
+  const setAuthor = setAuthorLocal;
   const [bridgeUrl, setBridgeUrl] = useState(() => readLocalStorage<string>(KEY_BRIDGE_URL, ''));
   const [token, setToken] = useState(() => readLocalStorage<string>(KEY_TOKEN, ''));
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const oauthBase = (endpointBase || '').replace(/\/+$/, '');
+
+  const doFetch = useCallback(
+    (path: string, init: RequestInit = {}) =>
+      mode === 'oauth' ? oauthFetch(oauthBase, path, init) : bridgeFetch(bridgeUrl, token, path, init),
+    [mode, oauthBase, bridgeUrl, token],
+  );
   const [eventId, setEventId] = useState<string | null>(null);
   const [rectTick, setRectTick] = useState(0);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -345,7 +400,7 @@ export function UiProbe() {
       dataURL = await captureElement(selection.element);
     }
     try {
-      const response = await bridgeFetch(bridgeUrl, token, '/ui-prompt', {
+      const response = await doFetch('/ui-prompt', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -375,7 +430,7 @@ export function UiProbe() {
       setState('error');
       setErrorMsg(String(e));
     }
-  }, [selection, prompt, capture, recents, author, bridgeUrl, token]);
+  }, [selection, prompt, capture, recents, author, doFetch]);
 
   const resetAll = useCallback(() => {
     setSelection(null);
@@ -389,13 +444,13 @@ export function UiProbe() {
   const cancelSend = useCallback(async () => {
     if (eventId) {
       try {
-        await bridgeFetch(bridgeUrl, token, `/ui-prompt/${eventId}/cancel`, { method: 'POST' });
+        await doFetch(`/ui-prompt/${eventId}/cancel`, { method: 'POST' });
       } catch {
         /* best-effort: close anyway */
       }
     }
     resetAll();
-  }, [eventId, resetAll, bridgeUrl, token]);
+  }, [eventId, resetAll, doFetch]);
 
   // Auto-close after the grace window if the user doesn't cancel.
   useEffect(() => {
@@ -419,7 +474,7 @@ export function UiProbe() {
     let alive = true;
     const load = async () => {
       try {
-        const resp = await bridgeFetch(bridgeUrl, token, '/ui-prompts');
+        const resp = await doFetch('/ui-prompts');
         if (!resp.ok) return;
         const body = (await resp.json()) as { events?: HistoryEvent[] };
         if (alive) setHistoryEvents(body.events ?? []);
@@ -433,7 +488,7 @@ export function UiProbe() {
       alive = false;
       window.clearInterval(t);
     };
-  }, [historyOpen, bridgeUrl, token]);
+  }, [historyOpen, doFetch]);
 
   const button = useMemo(
     () => (
@@ -500,7 +555,7 @@ export function UiProbe() {
   );
 
   const settingsButton = useMemo(
-    () => (
+    () => mode === 'oauth' ? null : (
       <button
         type="button"
         data-ui-probe
@@ -528,7 +583,7 @@ export function UiProbe() {
         ⚙ bridge
       </button>
     ),
-    [settingsOpen],
+    [settingsOpen, mode],
   );
 
   return (
@@ -895,37 +950,50 @@ export function UiProbe() {
               </div>
             </div>
 
-            <label
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                marginBottom: 8,
-                fontSize: 11,
-                color: '#92b0fa',
-                fontFamily: '"Kode Mono", monospace',
-              }}
-            >
-              <span style={{ letterSpacing: '0.04em' }}>author</span>
-              <input
-                type="text"
-                data-ui-probe
-                value={author}
-                onChange={(e) => setAuthor(e.target.value)}
-                placeholder="your name"
-                maxLength={80}
+            {authorOverride ? (
+              <div
                 style={{
-                  flex: 1,
-                  padding: '3px 8px',
-                  borderRadius: 4,
-                  border: '1px solid rgba(146,176,250,0.3)',
-                  background: 'rgba(3,13,32,0.8)',
-                  color: '#edf2ff',
-                  fontFamily: 'inherit',
+                  marginBottom: 8,
                   fontSize: 11,
+                  color: '#92b0fa',
+                  fontFamily: '"Kode Mono", monospace',
                 }}
-              />
-            </label>
+              >
+                author: <span style={{ color: '#edf2ff' }}>{authorOverride}</span>
+              </div>
+            ) : (
+              <label
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  marginBottom: 8,
+                  fontSize: 11,
+                  color: '#92b0fa',
+                  fontFamily: '"Kode Mono", monospace',
+                }}
+              >
+                <span style={{ letterSpacing: '0.04em' }}>author</span>
+                <input
+                  type="text"
+                  data-ui-probe
+                  value={author}
+                  onChange={(e) => setAuthor(e.target.value)}
+                  placeholder="your name"
+                  maxLength={80}
+                  style={{
+                    flex: 1,
+                    padding: '3px 8px',
+                    borderRadius: 4,
+                    border: '1px solid rgba(146,176,250,0.3)',
+                    background: 'rgba(3,13,32,0.8)',
+                    color: '#edf2ff',
+                    fontFamily: 'inherit',
+                    fontSize: 11,
+                  }}
+                />
+              </label>
+            )}
 
             {recents.length > 0 && (
               <select

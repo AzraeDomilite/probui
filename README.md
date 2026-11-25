@@ -280,6 +280,59 @@ Both are persisted in `localStorage` (`probui.bridge_url.v1`, `probui.token.v1`)
 
 **On the host, Claude Code Monitor** : nothing changes. The bridge emits `[ui-prompt] {…}` on stdout the same way. The `author` field in the payload tells Claude who sent each prompt.
 
+## 8.2. OAuth-backed deployment (recommended for a team site)
+
+When the hosting site already authenticates its users (OAuth, SSO, Django session, …), there's a cleaner model than sharing a Bearer token in every browser : the backend proxies to the bridge, and the user's authenticated identity becomes `author` on the server side. No token in localStorage, no bridge URL to configure, no secret to rotate out-of-band — the user just logs into the site as usual.
+
+**Shape of the deployment** :
+
+```
+browser ── POST /api/foo/ui-prompt  ──▶  backend (checks session + whitelist)
+                                              │
+                                              ▼
+                                         http://127.0.0.1:8766/ui-prompt
+                                         (bridge stays strictly loopback)
+```
+
+The bridge **never** leaves `127.0.0.1` in this mode : the only client it ever hears from is the backend relay on the same host. No `UI_BRIDGE_HOST=0.0.0.0`, no public DNS entry, no `UI_BRIDGE_TOKEN` needed.
+
+**Mount the overlay with `mode='oauth'`** :
+
+```tsx
+import { UiProbe } from './dev/UiProbe';
+
+// Tiny probe at startup : ask the backend whether this user is whitelisted.
+fetch('/api/me/ui-probe', { credentials: 'same-origin' })
+  .then((r) => r.ok ? r.json() : null)
+  .then((data) => {
+    if (!data?.allowed) return;
+    createRoot(anchor).render(
+      <UiProbe
+        mode="oauth"
+        endpointBase="/api/foo"
+        authorOverride={data.login ?? ''}
+      />,
+    );
+  });
+```
+
+Three props :
+- **`mode="oauth"`** switches `fetch` to `credentials: 'same-origin'` and hides the `⚙ bridge` button and the bridge-URL / token inputs. Nothing is user-configurable.
+- **`endpointBase`** is the relative path your backend exposes. probui will POST to `${endpointBase}/ui-prompt`, GET `${endpointBase}/ui-prompts`, POST `${endpointBase}/ui-prompt/<id>/cancel`.
+- **`authorOverride`** replaces the manually-editable author field (the backend is the actual source of truth ; this is just for the display in the history panel).
+
+**Backend contract** — three endpoints forward to the loopback bridge after the session check :
+
+| probui path | relay target |
+|---|---|
+| `POST ${endpointBase}/ui-prompt` | `POST http://127.0.0.1:8766/ui-prompt` (with `author` overwritten from the session) |
+| `POST ${endpointBase}/ui-prompt/<id>/cancel` | `POST http://127.0.0.1:8766/ui-prompt/<id>/cancel` |
+| `GET  ${endpointBase}/ui-prompts` | `GET  http://127.0.0.1:8766/ui-prompts` |
+
+Add a **whitelist check** before forwarding : OAuth auth proves who the user is, but it doesn't say they should see dev tools. Keep a small list of user identifiers in config (env var or secrets), reject outside of it with 403 (and have `/api/me/ui-probe` answer `{allowed: false}` rather than 403 so the overlay silently doesn't mount — no console noise for non-dev users).
+
+**CSRF** : probui reads a `csrftoken` cookie and sends it as `X-CSRFToken` on POST requests. Harmless if your backend doesn't check CSRF ; Django-friendly if it does.
+
 ## 9. Known limitations
 
 - **One bridge at a time** per port (8766 by default). Use `UI_BRIDGE_PORT` + `VITE_UI_BRIDGE_URL` to test two projects in parallel.
