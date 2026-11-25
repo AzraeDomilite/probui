@@ -69,6 +69,7 @@ function emitNew(evt) {
   const line = {
     eventId: evt.eventId,
     t: evt.t,
+    author: evt.author,
     prompt: evt.prompt,
     selector: evt.selector,
     url: evt.url,
@@ -142,6 +143,7 @@ async function handleCreate(req, res, origin) {
   const evt = {
     eventId: randomUUID(),
     t: new Date().toISOString(),
+    author: typeof data.author === 'string' ? data.author.slice(0, 80) : '',
     prompt: typeof data.prompt === 'string' ? data.prompt.slice(0, 4000) : '',
     selector: typeof data.selector === 'string' ? data.selector.slice(0, 500) : '',
     url: typeof data.url === 'string' ? data.url.slice(0, 500) : '',
@@ -256,6 +258,7 @@ function handleList(res, origin) {
     .map((evt) => ({
       eventId: evt.eventId,
       t: evt.t,
+      author: evt.author || '',
       prompt: evt.prompt,
       selector: evt.selector,
       url: evt.url,

@@ -16,6 +16,7 @@ const URL_BRIDGE = `${URL_BRIDGE_ROOT}/ui-prompt`;
 const URL_BRIDGE_LIST = `${URL_BRIDGE_ROOT}/ui-prompts`;
 const KEY_PROMPTS = 'probui.recent_prompts.v1';
 const KEY_CAPTURE = 'probui.capture_enabled.v1';
+const KEY_AUTHOR = 'probui.author.v1';
 const HTML2CANVAS_CDN = 'https://esm.sh/html2canvas@1.4.1';
 const MAX_RECENT_PROMPTS = 10;
 const HISTORY_POLL_MS = 2000;
@@ -37,6 +38,7 @@ type State = 'idle' | 'sending' | 'sent' | 'error';
 interface HistoryEvent {
   eventId: string;
   t: string;
+  author: string;
   prompt: string;
   selector: string;
   url: string;
@@ -215,6 +217,7 @@ export function UiProbe() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [capture, setCapture] = useState(() => readLocalStorage<boolean>(KEY_CAPTURE, false));
   const [recents, setRecents] = useState<string[]>(() => readLocalStorage<string[]>(KEY_PROMPTS, []));
+  const [author, setAuthor] = useState(() => readLocalStorage<string>(KEY_AUTHOR, ''));
   const [eventId, setEventId] = useState<string | null>(null);
   const [rectTick, setRectTick] = useState(0);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -224,6 +227,10 @@ export function UiProbe() {
   useEffect(() => {
     writeLocalStorage(KEY_CAPTURE, capture);
   }, [capture]);
+
+  useEffect(() => {
+    writeLocalStorage(KEY_AUTHOR, author);
+  }, [author]);
 
   useEffect(() => {
     const kd = (e: KeyboardEvent) => {
@@ -315,6 +322,7 @@ export function UiProbe() {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
+          author: author.trim(),
           prompt: prompt.trim(),
           selector: selection.selector,
           url: window.location.href,
@@ -340,7 +348,7 @@ export function UiProbe() {
       setState('error');
       setErrorMsg(String(e));
     }
-  }, [selection, prompt, capture, recents]);
+  }, [selection, prompt, capture, recents, author]);
 
   const resetAll = useCallback(() => {
     setSelection(null);
@@ -571,6 +579,17 @@ export function UiProbe() {
                       >
                         {new Date(evt.t).toLocaleTimeString()}
                       </time>
+                      <span
+                        style={{
+                          fontSize: 11,
+                          color: evt.author ? '#edf2ff' : '#92b0fa',
+                          fontFamily: '"Kode Mono", monospace',
+                          fontStyle: evt.author ? 'normal' : 'italic',
+                        }}
+                        title={evt.author ? 'author' : 'no author set'}
+                      >
+                        {evt.author || 'anonymous'}
+                      </span>
                       {evt.hasScreenshot && (
                         <span style={{ fontSize: 10, color: '#92b0fa' }} title="screenshot attached">
                           📷
@@ -691,6 +710,38 @@ export function UiProbe() {
                 {selection.selector}
               </div>
             </div>
+
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                marginBottom: 8,
+                fontSize: 11,
+                color: '#92b0fa',
+                fontFamily: '"Kode Mono", monospace',
+              }}
+            >
+              <span style={{ letterSpacing: '0.04em' }}>author</span>
+              <input
+                type="text"
+                data-ui-probe
+                value={author}
+                onChange={(e) => setAuthor(e.target.value)}
+                placeholder="your name"
+                maxLength={80}
+                style={{
+                  flex: 1,
+                  padding: '3px 8px',
+                  borderRadius: 4,
+                  border: '1px solid rgba(146,176,250,0.3)',
+                  background: 'rgba(3,13,32,0.8)',
+                  color: '#edf2ff',
+                  fontFamily: 'inherit',
+                  fontSize: 11,
+                }}
+              />
+            </label>
 
             {recents.length > 0 && (
               <select
